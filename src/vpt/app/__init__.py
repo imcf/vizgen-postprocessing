@@ -8,5 +8,6 @@ dask.config.set(
         "distributed.worker.memory.spill": worker_memory_usage_target,
         "distributed.worker.memory.pause": worker_memory_usage_target,
         "distributed.worker.memory.terminate": 0.95,
+        "distributed.worker.use-file-locking":False,
     }
 )

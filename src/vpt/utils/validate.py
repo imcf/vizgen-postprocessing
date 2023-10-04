@@ -8,7 +8,7 @@ from vpt_core.io.vzgfs import filesystem_path_split
 
 def validate_experimental():
     try:
-        if not strtobool(os.environ.get(IS_VPT_EXPERIMENTAL_VAR, "false").lower()):
+        if not strtobool((IS_VPT_EXPERIMENTAL_VAR).lower()):
             raise NotImplementedError(
                 "Can not use experimental feature. If you want to enable experimental functionality set the environment"
                 f""" variable {IS_VPT_EXPERIMENTAL_VAR} to "true" or "1" """

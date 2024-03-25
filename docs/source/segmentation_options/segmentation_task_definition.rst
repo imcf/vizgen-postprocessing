@@ -176,6 +176,10 @@ Parameters:
   
   Minimum area of a polygon to retain the cell. Used to filter spurious detections.
 
+* dilation_rad
+  
+  Dilate the segmented objects. Used to simulate cell boundaries from a nucleus.
+
 
 Usage:
 
@@ -184,5 +188,6 @@ Usage:
     "polygon_parameters": {
         "simplification_tol": 2,
         "smoothing_radius": 10,
-        "minimum_final_area": 500
+        "minimum_final_area": 500,
+        "dilation_rad": 100
     }

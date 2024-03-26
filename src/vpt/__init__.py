@@ -18,4 +18,4 @@ os.environ["USE_PYGEOS"] = "0"
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
-IS_VPT_EXPERIMENTAL_VAR = "VPT_EXPERIMENTAL"
+IS_VPT_EXPERIMENTAL_VAR = "true"

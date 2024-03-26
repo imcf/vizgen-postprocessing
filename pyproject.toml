@@ -56,7 +56,6 @@ s3fs = "2021.10.0"
 scanpy = "1.9.3"
 scipy = ">=1.8.1"
 shapely = ">=2.0.0"
-torch = "2.0.0"
 vpt_core = ">=1.1.0"
 vpt_plugin_cellpose = { version = ">=1.0.0", optional = true }
 vpt_plugin_watershed = { version = ">=1.0.0", optional = true }

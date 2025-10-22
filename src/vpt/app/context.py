@@ -90,7 +90,9 @@ class Context:
         ret["name"] = f"{cnt_args['name']}/task-{ind}"
         if pname:
             parent = Path(pname)
-            Context._set_profile_name(ret, str(parent.with_stem(f"{parent.stem}_{ind}")))
+            Context._set_profile_name(
+                ret, str(parent.with_stem(f"{parent.stem}_{ind}"))
+            )
         return ret
 
     def is_distributed(self) -> bool:
@@ -143,18 +145,35 @@ class Context:
         return Client(cluster)
 
     def parallel_run(self, tasks: Iterable[Task]) -> List:
+        """
+        Run tasks in parallel using Dask or locally, with a progress bar showing tiles/tasks completed.
+        """
         if self.get_workers_count() == 1:
-            return [t.proc(t.args) for t in tasks]
+            from tqdm import tqdm
+
+            results = []
+            for t in tqdm(
+                tasks,
+                desc="Tiles processed",
+                unit="tile",
+                dynamic_ncols=True,
+                bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
+            ):
+                results.append(t.proc(t.args))
+            return results
         else:
             import dask.bag as db
-            from dask.distributed import progress
+            from dask.diagnostics import ProgressBar
 
-            # Initializes a Dask local cluster with the correct number of workers
             with self.get_cluster() as cluster:
                 with self.get_client(cluster):
                     cnt_args = self.arguments()
                     children: List[Dict] = [
-                        {"task": t, "cnt_args": Context.modify_context_as_sub(cnt_args, i)} for i, t in enumerate(tasks)
+                        {
+                            "task": t,
+                            "cnt_args": Context.modify_context_as_sub(cnt_args, i),
+                        }
+                        for i, t in enumerate(tasks)
                     ]
                     mp_bag = db.from_sequence(children)
 
@@ -162,11 +181,10 @@ class Context:
                         with Context(**cnt_args):
                             return task.proc(task.args)
 
-                    # Runs processing using the Dask local cluster initialized above
                     mp_bag = mp_bag.map(lambda b: _context_wrapper(**b))
-                    if log.is_verbose():
-                        progress(mp_bag)
-                    result = mp_bag.compute()
+                    # Always show Dask progress bar for parallel runs
+                    with ProgressBar():
+                        result = mp_bag.compute()
                     self.update_with_children([x["cnt_args"] for x in children])
 
                     return result

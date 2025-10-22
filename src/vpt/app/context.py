@@ -190,10 +190,16 @@ class Context:
         >>> ctx.parallel_run([Task(proc, args), ...])
         """
         if self.get_workers_count() == 1:
-            return [t.proc(t.args) for t in tasks]
+            # Use tqdm for local progress bar
+            from tqdm import tqdm
+
+            results = []
+            for t in tqdm(tasks, desc="Tiles processed", unit="tile"):
+                results.append(t.proc(t.args))
+            return results
         else:
             import dask.bag as db
-            from dask.distributed import progress
+            from dask.diagnostics import ProgressBar
 
             try:
                 # Initializes a Dask local cluster with the correct number of workers
@@ -215,9 +221,9 @@ class Context:
 
                         # Runs processing using the Dask local cluster initialized above
                         mp_bag = mp_bag.map(lambda b: _context_wrapper(**b))
-                        if log.is_verbose():
-                            progress(mp_bag)
-                        result = mp_bag.compute()
+                        # Always show Dask progress bar for parallel runs
+                        with ProgressBar():
+                            result = mp_bag.compute()
                         self.update_with_children([x["cnt_args"] for x in children])
 
                         return result

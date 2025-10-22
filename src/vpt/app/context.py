@@ -148,61 +148,139 @@ class Context:
         """
         Run tasks in parallel using Dask or locally, with a progress bar showing tiles/tasks completed.
 
+        If all tasks have an 'output_path' attribute, use file-based progress bar by monitoring
+        the 'result_tiles' subfolder inside output_path. The folder is emptied before run.
+
         Examples
         --------
         >>> ctx = Context()
         >>> ctx.parallel_run([Task(lambda x: x, 1), Task(lambda x: x, 2)])
         [1, 2]
         """
-        if self.get_workers_count() == 1:
-            from tqdm import tqdm
+        import os
+        import shutil
 
-            results = []
-            for t in tqdm(
-                tasks,
-                desc="Tiles processed",
-                unit="tile",
-                dynamic_ncols=True,
-                bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
-            ):
-                results.append(t.proc(t.args))
-            return results
-        else:
-            import dask.bag as db
+        from tqdm.auto import tqdm
 
-            # from dask.distributed import as_completed
-            from tqdm.auto import tqdm
+        # Try to infer output_path from tasks
+        tasks = list(tasks)
+        output_paths = [getattr(t.args, "output_path", None) for t in tasks]
+        if all(p is not None for p in output_paths):
+            # Use the first output_path (assume all are the same)
+            result_tiles_path = os.path.join(output_paths[0], "result_tiles")
+            # Empty the result_tiles folder
+            if os.path.exists(result_tiles_path):
+                shutil.rmtree(result_tiles_path)
+            os.makedirs(result_tiles_path, exist_ok=True)
 
-            with self.get_cluster() as cluster:
-                with self.get_client(cluster):
-                    cnt_args = self.arguments()
-                    children: List[Dict] = [
-                        {
-                            "task": t,
-                            "cnt_args": Context.modify_context_as_sub(cnt_args, i),
-                        }
-                        for i, t in enumerate(tasks)
-                    ]
-                    mp_bag = db.from_sequence(children)
+            total_tiles = len(tasks)
 
-                    def _context_wrapper(task: Task, cnt_args):
-                        with Context(**cnt_args):
-                            return task.proc(task.args)
+            # Launch tasks in parallel as before
+            if self.get_workers_count() == 1:
+                # Local run
+                results = []
+                with tqdm(
+                    total=total_tiles,
+                    desc="Tiles processed (files)",
+                    unit="tile",
+                    dynamic_ncols=True,
+                ) as pbar:
+                    for t in tasks:
+                        result = t.proc(t.args)
+                        results.append(result)
+                        completed = len(os.listdir(result_tiles_path))
+                        pbar.n = completed
+                        pbar.refresh()
+                return results
+            else:
+                # Dask run
+                import dask
+                from dask.distributed import as_completed
 
-                    mp_bag = mp_bag.map(lambda b: _context_wrapper(**b))
-                    # Use compute() for local threads/processes and show progress with tqdm
-                    results = list(
-                        tqdm(
-                            mp_bag.compute(),
-                            total=len(children),
-                            desc="Tiles processed",
+                with self.get_cluster() as cluster:
+                    with self.get_client(cluster):
+                        cnt_args = self.arguments()
+                        children: List[Dict] = [
+                            {
+                                "task": t,
+                                "cnt_args": Context.modify_context_as_sub(cnt_args, i),
+                            }
+                            for i, t in enumerate(tasks)
+                        ]
+
+                        # Use delayed for progress
+                        @dask.delayed
+                        def _context_wrapper(task: Task, cnt_args):
+                            with Context(**cnt_args):
+                                return task.proc(task.args)
+
+                        delayed_tasks = [
+                            _context_wrapper(**child) for child in children
+                        ]
+
+                        # File-based progress bar
+                        results = []
+                        with tqdm(
+                            total=total_tiles,
+                            desc="Tiles processed (files)",
                             unit="tile",
                             dynamic_ncols=True,
-                            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
+                        ) as pbar:
+                            for future in as_completed(delayed_tasks):
+                                result = future.result()
+                                results.append(result)
+                                pbar.n = len(results)
+                                pbar.refresh()
+                        self.update_with_children([x["cnt_args"] for x in children])
+                        return results
+        else:
+            # Fallback: original behavior
+            if self.get_workers_count() == 1:
+                from tqdm import tqdm
+
+                results = []
+                for t in tqdm(
+                    tasks,
+                    desc="Tiles processed",
+                    unit="tile",
+                    dynamic_ncols=True,
+                    bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
+                ):
+                    results.append(t.proc(t.args))
+                return results
+            else:
+                import dask.bag as db
+                from tqdm.auto import tqdm
+
+                with self.get_cluster() as cluster:
+                    with self.get_client(cluster):
+                        cnt_args = self.arguments()
+                        children: List[Dict] = [
+                            {
+                                "task": t,
+                                "cnt_args": Context.modify_context_as_sub(cnt_args, i),
+                            }
+                            for i, t in enumerate(tasks)
+                        ]
+                        mp_bag = db.from_sequence(children)
+
+                        def _context_wrapper(task: Task, cnt_args):
+                            with Context(**cnt_args):
+                                return task.proc(task.args)
+
+                        mp_bag = mp_bag.map(lambda b: _context_wrapper(**b))
+                        results = list(
+                            tqdm(
+                                mp_bag.compute(),
+                                total=len(children),
+                                desc="Tiles processed",
+                                unit="tile",
+                                dynamic_ncols=True,
+                                bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
+                            )
                         )
-                    )
-                    self.update_with_children([x["cnt_args"] for x in children])
-                    return results
+                        self.update_with_children([x["cnt_args"] for x in children])
+                        return results
 
 
 def current_context() -> Context:

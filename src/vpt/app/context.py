@@ -147,6 +147,12 @@ class Context:
     def parallel_run(self, tasks: Iterable[Task]) -> List:
         """
         Run tasks in parallel using Dask or locally, with a progress bar showing tiles/tasks completed.
+
+        Examples
+        --------
+        >>> ctx = Context()
+        >>> ctx.parallel_run([Task(lambda x: x, 1), Task(lambda x: x, 2)])
+        [1, 2]
         """
         if self.get_workers_count() == 1:
             from tqdm import tqdm
@@ -163,7 +169,9 @@ class Context:
             return results
         else:
             import dask.bag as db
-            from dask.diagnostics import ProgressBar
+
+            # from dask.distributed import as_completed
+            from tqdm.auto import tqdm
 
             with self.get_cluster() as cluster:
                 with self.get_client(cluster):
@@ -182,12 +190,37 @@ class Context:
                             return task.proc(task.args)
 
                     mp_bag = mp_bag.map(lambda b: _context_wrapper(**b))
-                    # Always show Dask progress bar for parallel runs
-                    with ProgressBar():
-                        result = mp_bag.compute()
-                    self.update_with_children([x["cnt_args"] for x in children])
+                    # Submit all tasks and use tqdm for notebook/terminal progress
+                    future = mp_bag.compute_async()
+                    n_tasks = len(children)
+                    results = []
+                    from time import sleep
 
-                    return result
+                    from dask.distributed import Future
+                    from tqdm.auto import tqdm
+
+                    # Wait for all futures to complete, show progress
+                    with tqdm(
+                        total=n_tasks,
+                        desc="Tiles processed",
+                        unit="tile",
+                        dynamic_ncols=True,
+                        bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
+                    ) as pbar:
+                        while len(results) < n_tasks:
+                            # Only collect finished futures
+                            finished = [
+                                f
+                                for f in future
+                                if isinstance(f, Future) and f.status == "finished"
+                            ]
+                            for f in finished:
+                                if f not in results:
+                                    results.append(f.result())
+                                    pbar.update(1)
+                            sleep(0.1)
+                    self.update_with_children([x["cnt_args"] for x in children])
+                    return results
 
 
 def current_context() -> Context:

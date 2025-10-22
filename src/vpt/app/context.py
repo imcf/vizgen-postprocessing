@@ -90,7 +90,9 @@ class Context:
         ret["name"] = f"{cnt_args['name']}/task-{ind}"
         if pname:
             parent = Path(pname)
-            Context._set_profile_name(ret, str(parent.with_stem(f"{parent.stem}_{ind}")))
+            Context._set_profile_name(
+                ret, str(parent.with_stem(f"{parent.stem}_{ind}"))
+            )
         return ret
 
     def is_distributed(self) -> bool:
@@ -102,6 +104,13 @@ class Context:
         return Client(self.dask_args["address"])
 
     def run(self, proc: Callable, *args):
+        """
+        Run a process, locally or distributed, with improved PermissionError handling.
+
+        Examples
+        --------
+        >>> ctx.run(some_function, arg1, arg2)
+        """
         if not self.is_distributed():
             proc(*args)
         else:
@@ -110,9 +119,21 @@ class Context:
                 with Context(**ctx):
                     func(*func_args)
 
-            with self.dask_client() as c:
-                _ = c.submit(remote_run, self.arguments(), proc, *args).result()
-                log.info("contex.run.distributed finished!")
+            try:
+                with self.dask_client() as c:
+                    _ = c.submit(remote_run, self.arguments(), proc, *args).result()
+                    log.info("contex.run.distributed finished!")
+            except PermissionError as err:
+                log.error(
+                    f"PermissionError encountered during distributed run: {err}\n"
+                    "This is often caused by system restrictions on killing worker processes.\n"
+                    "Possible workarounds for regular users:\n"
+                    "- Try running in a directory where you have full permissions.\n"
+                    "- Temporarily disable antivirus or endpoint protection for this process.\n"
+                    "- If using Dask, try setting the scheduler to 'threads' instead of 'processes' (e.g., set DASK_SCHEDULER=threads or use dask.config.set(scheduler='threads')).\n"
+                    "- Contact your IT administrator if restrictions persist.\n"
+                )
+                raise
 
     def get_workers_count(self) -> int:
         if self.dask_args is not None:
@@ -124,14 +145,32 @@ class Context:
             return 1
 
     def get_cluster(self):
+        """
+        Create a Dask cluster for local or distributed execution.
+        For local runs, use a single worker with multiple threads to avoid PermissionError.
+
+        Returns
+        -------
+        LocalCluster or Empty
+            Configured Dask cluster for the context.
+
+        Examples
+        --------
+        >>> ctx.get_cluster()
+        """
         if self.is_distributed():
             return Empty()
         else:
+            import dask
             from dask.distributed import LocalCluster
 
+            # Use threads scheduler for local runs to avoid PermissionError for non-admin users
+            dask.config.set(scheduler="threads")
+            # Use a single worker with multiple threads for local parallelism
+            threads = self.get_workers_count()
             return LocalCluster(
-                n_workers=self.get_workers_count(),
-                threads_per_worker=1,
+                n_workers=1,
+                threads_per_worker=threads,
                 dashboard_address=None,
             )
 
@@ -143,33 +182,56 @@ class Context:
         return Client(cluster)
 
     def parallel_run(self, tasks: Iterable[Task]) -> List:
+        """
+        Run tasks in parallel using Dask, with PermissionError handling.
+
+        Examples
+        --------
+        >>> ctx.parallel_run([Task(proc, args), ...])
+        """
         if self.get_workers_count() == 1:
             return [t.proc(t.args) for t in tasks]
         else:
             import dask.bag as db
             from dask.distributed import progress
 
-            # Initializes a Dask local cluster with the correct number of workers
-            with self.get_cluster() as cluster:
-                with self.get_client(cluster):
-                    cnt_args = self.arguments()
-                    children: List[Dict] = [
-                        {"task": t, "cnt_args": Context.modify_context_as_sub(cnt_args, i)} for i, t in enumerate(tasks)
-                    ]
-                    mp_bag = db.from_sequence(children)
+            try:
+                # Initializes a Dask local cluster with the correct number of workers
+                with self.get_cluster() as cluster:
+                    with self.get_client(cluster):
+                        cnt_args = self.arguments()
+                        children: List[Dict] = [
+                            {
+                                "task": t,
+                                "cnt_args": Context.modify_context_as_sub(cnt_args, i),
+                            }
+                            for i, t in enumerate(tasks)
+                        ]
+                        mp_bag = db.from_sequence(children)
 
-                    def _context_wrapper(task: Task, cnt_args):
-                        with Context(**cnt_args):
-                            return task.proc(task.args)
+                        def _context_wrapper(task: Task, cnt_args):
+                            with Context(**cnt_args):
+                                return task.proc(task.args)
 
-                    # Runs processing using the Dask local cluster initialized above
-                    mp_bag = mp_bag.map(lambda b: _context_wrapper(**b))
-                    if log.is_verbose():
-                        progress(mp_bag)
-                    result = mp_bag.compute()
-                    self.update_with_children([x["cnt_args"] for x in children])
+                        # Runs processing using the Dask local cluster initialized above
+                        mp_bag = mp_bag.map(lambda b: _context_wrapper(**b))
+                        if log.is_verbose():
+                            progress(mp_bag)
+                        result = mp_bag.compute()
+                        self.update_with_children([x["cnt_args"] for x in children])
 
-                    return result
+                        return result
+            except PermissionError as err:
+                log.error(
+                    f"PermissionError encountered during parallel_run: {err}\n"
+                    "This is often caused by system restrictions on killing worker processes.\n"
+                    "Possible workarounds for regular users:\n"
+                    "- Try running in a directory where you have full permissions.\n"
+                    "- Temporarily disable antivirus or endpoint protection for this process.\n"
+                    "- If using Dask, try setting the scheduler to 'threads' instead of 'processes' (e.g., set DASK_SCHEDULER=threads or use dask.config.set(scheduler='threads')).\n"
+                    "- Contact your IT administrator if restrictions persist.\n"
+                )
+                raise
 
 
 def current_context() -> Context:

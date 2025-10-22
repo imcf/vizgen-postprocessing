@@ -13,15 +13,21 @@ from vpt.cmd_args import get_cmd_entrypoint
 from vpt.utils.metadata import get_installed_versions
 
 warnings.filterwarnings("ignore", message=".*initial implementation of Parquet.*")
-warnings.filterwarnings("ignore", message=".*invalid value encountered in intersection.*")
-warnings.filterwarnings("ignore", message=".*pandas.Int64Index is deprecated.*")  # geopandas
+warnings.filterwarnings(
+    "ignore", message=".*invalid value encountered in intersection.*"
+)
+warnings.filterwarnings(
+    "ignore", message=".*pandas.Int64Index is deprecated.*"
+)  # geopandas
 warnings.filterwarnings("ignore", category=NotGeoreferencedWarning)
 
 
 # we need this function as a root of profile stats
 def run_command(cmd: str, args: Namespace):
     log.info(f"run {cmd} with args:{args}")
-    installed_versions = [f"{key} {val}" for key, val in get_installed_versions().items()]
+    installed_versions = [
+        f"{key} {val}" for key, val in get_installed_versions().items()
+    ]
     log.info("\n".join(["installed versions:", *installed_versions]))
     get_cmd_entrypoint(cmd)(args)
 
@@ -49,7 +55,12 @@ def split_args(parsed: argparse.Namespace) -> Tuple[Dict, argparse.Namespace]:
 
     del parsed.processes
     del parsed.log_file, parsed.log_level, parsed.verbose, parsed.profile_execution_time
-    del parsed.aws_profile_name, parsed.aws_access_key, parsed.aws_secret_key, parsed.gcs_service_account_key
+    del (
+        parsed.aws_profile_name,
+        parsed.aws_access_key,
+        parsed.aws_secret_key,
+        parsed.gcs_service_account_key,
+    )
     return ctx_args, parsed
 
 
@@ -61,6 +72,18 @@ def main(parsed: argparse.Namespace):
         with Context(**ctx) as c:
             c.run(run_command, subparser_name, parsed)
 
+    except PermissionError as err:
+        log.error(
+            f"vpt has encountered a PermissionError: {err}\n"
+            "This is often caused by system restrictions on killing worker processes.\n"
+            "Possible workarounds for regular users:\n"
+            "- Try running in a directory where you have full permissions.\n"
+            "- Temporarily disable antivirus or endpoint protection for this process.\n"
+            "- If using Dask, try setting the scheduler to 'threads' instead of 'processes' (e.g., set DASK_SCHEDULER=threads or use dask.config.set(scheduler='threads')).\n"
+            "- Contact your IT administrator if restrictions persist.\n"
+        )
+        log.debug(f"Details:\n{err}\n{traceback.format_exc()}")
+        sys.exit(1)
     except Exception as err:
         log.error(f"vpt has encountered a runtime error ({err}) and will now exit")
         log.debug(f"Details:\n{err}\n{traceback.format_exc()}")

@@ -139,19 +139,48 @@ def construct_cell_x_gene(
     cell_id_list,
     output_transcripts: Optional[str] = None,
 ) -> pd.DataFrame:
-    import dask.bag as db
+    # import dask
+    # import platform
+
+    from dask.distributed import Client, LocalCluster, as_completed
+    from tqdm.auto import tqdm
 
     # Convert transcripts (iterator/generator) to list for parallel processing
     chunk_list = list(transcripts)
     needs_new_dt = output_transcripts is not None
 
-    # Parallelize chunk processing using Dask bag with processes
-    bag = db.from_sequence(chunk_list)
-    results = bag.map(
-        lambda chunk_df: process_chunk(
-            chunk_df, geometry_list, z_planes_count, cell_id_list, needs_new_dt
-        )
-    ).compute(scheduler="processes")
+    # Use threads for Dask LocalCluster to ensure robust parallelism on all platforms
+    use_processes = False
+    n_workers = min(4, len(chunk_list)) if len(chunk_list) > 0 else 1
+    with LocalCluster(
+        n_workers=n_workers,
+        threads_per_worker=1,
+        processes=use_processes,
+        dashboard_address=None,
+    ) as cluster:
+        with Client(cluster) as client:
+            futures = [
+                client.submit(
+                    process_chunk,
+                    chunk_df,
+                    geometry_list,
+                    z_planes_count,
+                    cell_id_list,
+                    needs_new_dt,
+                )
+                for chunk_df in chunk_list
+            ]
+            results = []
+            with tqdm(
+                total=len(futures),
+                desc="Transcript chunks processed",
+                unit="chunk",
+                dynamic_ncols=True,
+                bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
+            ) as pbar:
+                for fut in as_completed(futures):
+                    results.append(fut.result())
+                    pbar.update(1)
 
     # Unpack results
     cell_by_gene = pd.DataFrame({"cell": pd.to_numeric(cell_id_list)})

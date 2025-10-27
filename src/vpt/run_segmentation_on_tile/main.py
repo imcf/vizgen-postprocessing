@@ -1,9 +1,8 @@
-
-from typing import List, Tuple
-import torch
 import gc
+from typing import List, Tuple
 
 import numpy as np
+import torch
 from vpt_core import log
 from vpt_core.io.image import get_prepared_images, get_segmentation_images
 from vpt_core.segmentation.fuse import fuse_task_polygons
@@ -11,7 +10,11 @@ from vpt_core.segmentation.polygon_utils import get_upscale_matrix
 from vpt_core.segmentation.seg_result import SegmentationResult
 
 from vpt.entity.relationships import create_entity_relationships
-from vpt.run_segmentation_on_tile.cmd_args import RunOnTileCmdArgs, parse_cmd_args, validate_cmd_args
+from vpt.run_segmentation_on_tile.cmd_args import (
+    RunOnTileCmdArgs,
+    parse_cmd_args,
+    validate_cmd_args,
+)
 from vpt.run_segmentation_on_tile.output_utils import save_to_parquet
 from vpt.segmentation.segmentations_factory import get_seg_implementation
 from vpt.utils.seg_spec_utils import SegSpec, read_seg_spec, validate_seg_spec
@@ -43,7 +46,8 @@ def get_tile_segmentation(seg_spec: SegSpec, window_info: Tuple[int, int, int, i
         if not hasattr(seg_result, "__iter__"):
             if res_num > 1:
                 raise ValueError(
-                    f"Segmentation result for task {task.task_id} should be iterable and have " f"{res_num} elements"
+                    f"Segmentation result for task {task.task_id} should be iterable and have "
+                    f"{res_num} elements"
                 )
             seg_result = [seg_result]
 
@@ -72,7 +76,9 @@ def postprocess_seg_result(
     log.info(f"raw segmentation result contains {len(seg_result.df.index)} rows")
     if task.segmentation_properties["model_dimensions"] == "2D":
         log.info("fuze across z")
-        seg_result.update_column(SegmentationResult.z_index_field, lambda i: task.z_layers[i])
+        seg_result.update_column(
+            SegmentationResult.z_index_field, lambda i: task.z_layers[i]
+        )
         seg_result.fuse_across_z()
         seg_result.replicate_across_z(z_indexes)
 
@@ -82,12 +88,16 @@ def postprocess_seg_result(
     seg_result.set_entity_type(entity_type)
 
     if seg_result.df[seg_result.cell_id_field].gt(seg_result.MAX_ENTITY_ID).any():
-        raise OverflowError(f"Tile segmentation could not have more than {seg_result.MAX_ENTITY_ID} entities")
+        raise OverflowError(
+            f"Tile segmentation could not have more than {seg_result.MAX_ENTITY_ID} entities"
+        )
 
     return SegmentationResult.reindex_by_task([seg_result], [task.task_id])[0]
 
 
-def segmentation_on_tile(seg_spec: SegSpec, tile_index: int) -> List[SegmentationResult]:
+def segmentation_on_tile(
+    seg_spec: SegSpec, tile_index: int
+) -> List[SegmentationResult]:
     window_info = seg_spec.image_windows[tile_index]
     log.info(f"Tile {tile_index} {window_info}")
 
@@ -98,7 +108,9 @@ def segmentation_on_tile(seg_spec: SegSpec, tile_index: int) -> List[Segmentatio
         tasks_result,
         seg_spec.entity_type_relationships,
         {
-            entity: seg_spec.segmentation_task_fusion[entity].fused_polygon_postprocessing_parameters
+            entity: seg_spec.segmentation_task_fusion[
+                entity
+            ].fused_polygon_postprocessing_parameters
             for entity in seg_spec.segmentation_task_fusion.keys()
         },
     )

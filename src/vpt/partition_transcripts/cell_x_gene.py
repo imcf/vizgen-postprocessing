@@ -9,6 +9,7 @@ except ImportError:
 
 import numpy as np
 import pandas as pd
+import polars as pl
 import pyarrow.parquet as pq
 import shapely
 from shapely import Polygon
@@ -46,30 +47,32 @@ def get_chunks(input_transcripts: str, chunk_size: int):
 
 
 def write_detected_transcripts(
-    transcripts_df: pd.DataFrame, output_path: str, append: bool = False
+    transcripts_df, output_path: str, append: bool = False
 ) -> None:
     storage_options = get_storage_options(output_path)
 
     for attempt in retrying_attempts():
         with attempt:
             if output_path.endswith(".csv"):
-                transcripts_df.to_csv(
-                    output_path,
-                    index=False,
-                    header=not append,
-                    mode="a" if append else "w",
-                    storage_options=storage_options,
-                )
+                # Use Polars for CSV writing if possible
+                if isinstance(transcripts_df, pl.DataFrame):
+                    transcripts_df.write_csv(output_path)
+                else:
+                    pl.DataFrame(transcripts_df).write_csv(output_path)
             elif output_path.endswith(".parquet"):
-                transcripts_df.to_parquet(
-                    output_path,
-                    engine="fastparquet",
-                    index=False,
-                    append=append,
-                    compression="zstd",
-                    row_group_offsets=ROW_GROUP_SIZE,
-                    storage_options=storage_options,
-                )
+                # Polars can write parquet, but keep pandas for compatibility
+                if isinstance(transcripts_df, pl.DataFrame):
+                    transcripts_df.write_parquet(output_path, compression="zstd")
+                else:
+                    transcripts_df.to_parquet(
+                        output_path,
+                        engine="fastparquet",
+                        index=False,
+                        append=append,
+                        compression="zstd",
+                        row_group_offsets=ROW_GROUP_SIZE,
+                        storage_options=storage_options,
+                    )
             else:
                 raise NotImplementedError()
 
@@ -150,22 +153,28 @@ def process_chunk(
         else:
             one_gene_partition = np.array([[], []])
 
-        cell_x_one_gene = (
-            pd.DataFrame(one_gene_partition.T, columns=["cell_id", gene])
-            .groupby("cell_id")
-            .count()
+        # Use Polars for groupby/count
+        df_one_gene = pl.DataFrame(
+            {"cell_id": one_gene_partition[0], gene: one_gene_partition[1]}
         )
+        cell_x_one_gene = df_one_gene.groupby("cell_id").agg([pl.count()])
         gene_df_list.append(cell_x_one_gene)
 
+    # Use Polars for join/fillna
     cell_x_gene = (
-        pd.DataFrame(index=range(len(cell_id_list))).join(gene_df_list).fillna(0)
+        pl.DataFrame({"cell": cell_id_list})
+        .join(gene_df_list, on=None, how="left")
+        .fill_null(0)
     )
-    cell_x_gene["cell"] = pd.to_numeric(cell_id_list)
+    cell_x_gene = cell_x_gene.with_column(pl.col("cell").cast(pl.Int64))
 
     if len(transcripts_list) > 0:
-        transcripts_df = pd.concat(transcripts_list).loc[chunk_df.index]
+        transcripts_df = pl.concat([pl.DataFrame(t) for t in transcripts_list])
+        transcripts_df = transcripts_df.filter(pl.col("index").is_in(chunk_df.index))
     else:
-        transcripts_df = pd.DataFrame(columns=list(chunk_df.columns) + ["cell_id"])
+        transcripts_df = pl.DataFrame(
+            {col: [] for col in list(chunk_df.columns) + ["cell_id"]}
+        )
 
     log.info(
         "Finished processing chunk. Returning cell_x_gene matrix and transcripts_df."
@@ -253,23 +262,26 @@ def construct_cell_x_gene(
     log.info("Parallel chunk processing complete.")
 
     # Unpack results
-    cell_by_gene = pd.DataFrame({"cell": pd.to_numeric(cell_id_list)})
-    barcode_id_name_df = pd.DataFrame(columns=["barcode_id", "gene"])
+    cell_by_gene = pl.DataFrame({"cell": cell_id_list})
+    barcode_id_name_df = pl.DataFrame({"barcode_id": [], "gene": []})
     transcripts_df_list = []
     for i, (chunk_cell_by_gene, transcripts_df) in enumerate(results):
         log.info(f"Merging results from chunk {i + 1}/{len(results)}.")
         cell_by_gene = (
-            pd.concat([cell_by_gene, chunk_cell_by_gene])
+            pl.concat([cell_by_gene, chunk_cell_by_gene])
             .groupby("cell")
-            .sum(min_count=1)
-            .fillna(0)
-            .reset_index()
+            .agg([pl.sum(pl.col(col)) for col in cell_by_gene.columns if col != "cell"])
+            .fill_null(0)
         )
-        # barcode_id_name_df: collect from all chunks
         chunk = chunk_list[i]
-        barcode_id_name_df = pd.concat(
-            [barcode_id_name_df, chunk[["barcode_id", "gene"]]]
-        ).drop_duplicates(subset="barcode_id")
+        barcode_id_name_df = pl.concat(
+            [
+                barcode_id_name_df,
+                pl.DataFrame(
+                    {"barcode_id": chunk["barcode_id"], "gene": chunk["gene"]}
+                ),
+            ]
+        ).unique(subset=["barcode_id"])
         if needs_new_dt:
             transcripts_df_list.append(transcripts_df)
 
@@ -278,29 +290,27 @@ def construct_cell_x_gene(
         log.info(f"Writing transcripts to {output_transcripts}.")
         first_chunk = True
         for transcripts_df in transcripts_df_list:
-            transcripts_df = transcripts_df.rename(
-                columns={transcripts_df.columns[0]: ""}
-            )
-            if first_chunk:
-                write_detected_transcripts(
-                    transcripts_df, output_transcripts, append=False
-                )
-                first_chunk = False
+            # Polars does not support rename by index, so fallback to pandas for this step
+            if isinstance(transcripts_df, pl.DataFrame):
+                transcripts_df = transcripts_df.rename({transcripts_df.columns[0]: ""})
             else:
-                write_detected_transcripts(
-                    transcripts_df, output_transcripts, append=True
+                transcripts_df = transcripts_df.rename(
+                    columns={transcripts_df.columns[0]: ""}
                 )
+            write_detected_transcripts(
+                transcripts_df, output_transcripts, append=not first_chunk
+            )
+            first_chunk = False
 
-    cell_by_gene.set_index("cell", inplace=True, drop=True)
-    cell_by_gene.index = cell_by_gene.index.astype(np.int64)
-    cell_by_gene.index.name = "cell"
-    cell_by_gene = cell_by_gene.sort_index()
-
-    barcode_id_name_df = barcode_id_name_df.set_index("barcode_id")
-    barcode_id_name_df.sort_index(inplace=True)
-    cell_by_gene = cell_by_gene.reindex(list(barcode_id_name_df["gene"]), axis=1)
+    cell_by_gene = cell_by_gene.sort("cell")
+    barcode_id_name_df = barcode_id_name_df.sort("barcode_id")
+    # Reindex columns to match barcode_id_name_df["gene"]
+    gene_order = barcode_id_name_df["gene"].to_list()
+    cell_by_gene = cell_by_gene.select(["cell"] + gene_order)
     log.info("Finished construct_cell_x_gene. Returning cell_x_gene matrix.")
-    return cell_by_gene.astype("int")
+    return cell_by_gene.with_columns(
+        [pl.col(col).cast(pl.Int64) for col in cell_by_gene.columns if col != "cell"]
+    )
 
 
 def cell_by_gene_matrix(

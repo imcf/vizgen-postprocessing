@@ -1,5 +1,12 @@
 from typing import List, Optional
 
+try:
+    from vpt_core import log
+except ImportError:
+    import logging
+
+    log = logging.getLogger("cell_x_gene")
+
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
@@ -70,12 +77,44 @@ def write_detected_transcripts(
 def process_chunk(
     chunk_df, shapely_list, z_planes_count, cell_id_list, needs_new_dt: bool = False
 ):
+    """
+    Process a chunk of transcript data and assign cell IDs.
+
+    Parameters
+    ----------
+    chunk_df : pd.DataFrame
+        Transcript data chunk.
+    shapely_list : list
+        List of shapely polygons per z-plane.
+    z_planes_count : int
+        Number of z-planes.
+    cell_id_list : list
+        List of cell IDs.
+    needs_new_dt : bool, optional
+        Whether to assign new cell IDs to transcripts.
+
+    Returns
+    -------
+    cell_x_gene : pd.DataFrame
+        Cell-by-gene matrix for the chunk.
+    transcripts_df : pd.DataFrame
+        Transcripts with assigned cell IDs.
+
+    Examples
+    --------
+    >>> process_chunk(chunk_df, shapely_list, 3, cell_id_list)
+    """
+    log.info(
+        f"Processing chunk with {len(chunk_df)} transcripts and {z_planes_count} z-planes."
+    )
     genes_detected = chunk_df["gene"].unique()
+    log.info(f"Detected {len(genes_detected)} genes in chunk.")
     grouped = chunk_df.groupby(chunk_df["gene"])
 
     gene_df_list = []
     transcripts_list = []
     for gene in genes_detected:
+        log.info(f"Processing gene '{gene}' in chunk.")
         one_gene = grouped.get_group(gene)
         one_gene_partition_list = []
         for z in range(z_planes_count):
@@ -96,7 +135,6 @@ def process_chunk(
                     )
 
                 one_gene_z = one_gene_z.assign(cell_id=out)
-
                 transcripts_list.append(one_gene_z)
 
         if needs_new_dt:
@@ -129,6 +167,9 @@ def process_chunk(
     else:
         transcripts_df = pd.DataFrame(columns=list(chunk_df.columns) + ["cell_id"])
 
+    log.info(
+        "Finished processing chunk. Returning cell_x_gene matrix and transcripts_df."
+    )
     return cell_x_gene, transcripts_df
 
 
@@ -139,6 +180,32 @@ def construct_cell_x_gene(
     cell_id_list,
     output_transcripts: Optional[str] = None,
 ) -> pd.DataFrame:
+    """
+    Construct cell-by-gene matrix from transcript and geometry data.
+
+    Parameters
+    ----------
+    transcripts : iterator or generator
+        Transcript data chunks.
+    geometry_list : np.ndarray
+        Array of cell polygons per z-plane.
+    z_planes_count : int
+        Number of z-planes.
+    cell_id_list : list
+        List of cell IDs.
+    output_transcripts : str, optional
+        Output path for transcripts with cell IDs.
+
+    Returns
+    -------
+    cell_x_gene : pd.DataFrame
+        Cell-by-gene matrix.
+
+    Examples
+    --------
+    >>> construct_cell_x_gene(transcripts, geometry_list, 3, cell_id_list)
+    """
+    log.info("Starting construct_cell_x_gene.")
     # import dask
     # import platform
 
@@ -147,11 +214,13 @@ def construct_cell_x_gene(
 
     # Convert transcripts (iterator/generator) to list for parallel processing
     chunk_list = list(transcripts)
+    log.info(f"Loaded {len(chunk_list)} transcript chunks for parallel processing.")
     needs_new_dt = output_transcripts is not None
 
     # Use threads for Dask LocalCluster to ensure robust parallelism on all platforms
     use_processes = False
     n_workers = min(4, len(chunk_list)) if len(chunk_list) > 0 else 1
+    log.info(f"Launching Dask LocalCluster with {n_workers} workers.")
     with LocalCluster(
         n_workers=n_workers,
         threads_per_worker=1,
@@ -181,12 +250,14 @@ def construct_cell_x_gene(
                 for fut in as_completed(futures):
                     results.append(fut.result())
                     pbar.update(1)
+    log.info("Parallel chunk processing complete.")
 
     # Unpack results
     cell_by_gene = pd.DataFrame({"cell": pd.to_numeric(cell_id_list)})
     barcode_id_name_df = pd.DataFrame(columns=["barcode_id", "gene"])
     transcripts_df_list = []
     for i, (chunk_cell_by_gene, transcripts_df) in enumerate(results):
+        log.info(f"Merging results from chunk {i + 1}/{len(results)}.")
         cell_by_gene = (
             pd.concat([cell_by_gene, chunk_cell_by_gene])
             .groupby("cell")
@@ -204,6 +275,7 @@ def construct_cell_x_gene(
 
     # Write transcripts sequentially after parallel processing
     if needs_new_dt and output_transcripts is not None:
+        log.info(f"Writing transcripts to {output_transcripts}.")
         first_chunk = True
         for transcripts_df in transcripts_df_list:
             transcripts_df = transcripts_df.rename(
@@ -227,6 +299,7 @@ def construct_cell_x_gene(
     barcode_id_name_df = barcode_id_name_df.set_index("barcode_id")
     barcode_id_name_df.sort_index(inplace=True)
     cell_by_gene = cell_by_gene.reindex(list(barcode_id_name_df["gene"]), axis=1)
+    log.info("Finished construct_cell_x_gene. Returning cell_x_gene matrix.")
     return cell_by_gene.astype("int")
 
 
@@ -235,6 +308,28 @@ def cell_by_gene_matrix(
     transcripts: pd.DataFrame,
     output_transcripts: Optional[str] = None,
 ) -> pd.DataFrame:
+    """
+    Generate cell-by-gene matrix from boundaries and transcript data.
+
+    Parameters
+    ----------
+    bnds : Boundaries
+        Cell boundary object.
+    transcripts : pd.DataFrame
+        Transcript data.
+    output_transcripts : str, optional
+        Output path for transcripts with cell IDs.
+
+    Returns
+    -------
+    cell_x_gene : pd.DataFrame
+        Cell-by-gene matrix.
+
+    Examples
+    --------
+    >>> cell_by_gene_matrix(bnds, transcripts)
+    """
+    log.info("Starting cell_by_gene_matrix.")
     idList = []
     geomList: List[List[Polygon]] = []
     for z in range(bnds.get_z_planes_count()):
@@ -244,6 +339,9 @@ def cell_by_gene_matrix(
         for zIdx, poly in enumerate(feature.get_full_cell()):
             geomList[zIdx].append(poly)
 
+    log.info(
+        f"Prepared {len(idList)} cell IDs and {len(geomList)} z-planes for matrix construction."
+    )
     cell_x_gene = construct_cell_x_gene(
         transcripts,
         np.array(geomList),
@@ -251,5 +349,5 @@ def cell_by_gene_matrix(
         idList,
         output_transcripts,
     )
-
+    log.info("cell_by_gene_matrix complete. Returning cell_x_gene matrix.")
     return cell_x_gene

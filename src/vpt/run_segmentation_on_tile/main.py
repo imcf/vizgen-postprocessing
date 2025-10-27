@@ -1,4 +1,7 @@
+
 from typing import List, Tuple
+import torch
+import gc
 
 import numpy as np
 from vpt_core import log
@@ -33,6 +36,8 @@ def get_tile_segmentation(seg_spec: SegSpec, window_info: Tuple[int, int, int, i
 
         # Remove images from memory once the geometries are produced
         del images
+        torch.cuda.empty_cache()
+        gc.collect()
 
         res_num = len(task.entity_types_detected)
         if not hasattr(seg_result, "__iter__"):
@@ -56,6 +61,8 @@ def get_tile_segmentation(seg_spec: SegSpec, window_info: Tuple[int, int, int, i
                 )
             )
 
+    torch.cuda.empty_cache()
+    gc.collect()
     return tasks_result
 
 
@@ -111,6 +118,9 @@ def run_segmentation_on_tile(parsed_args):
     validate_seg_spec(seg_spec, args.tile_index, args.overwrite)
 
     result = segmentation_on_tile(seg_spec, args.tile_index)
+
+    torch.cuda.empty_cache()
+    gc.collect()
 
     save_to_parquet(
         result,
